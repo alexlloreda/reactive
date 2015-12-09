@@ -17,19 +17,36 @@ package object nodescala {
 
     /** Returns a future that is always completed with `value`.
      */
-    def always[T](value: T): Future[T] = ???
+    def always[T](value: T): Future[T] = {
+      val p = Promise[T]()
+      p.success(value)
+      p.future
+    }
     /** Returns a future that is never completed.
      *
      *  This future may be useful when testing if timeout logic works correctly.
      */
-    def never[T]: Future[T] = ???
-    /** Given a list of futures `fs`, returns the future holding the list of values of all the futures from `fs`.
-     *  The returned future is completed only once all of the futures in `fs` have been completed.
+    def never[T]: Future[T] = {
+      val p = Promise[T]()
+      p.future.onComplete {
+        case _ => {} // Do nothing
+      }
+      p.future
+    }
+    /** Given a list of futures `fs`, returns the future holding the list of values
+     *  of all the futures from `fs`.
+     *  The returned future is completed only once all of the futures in `fs` have
+     *  been completed.
      *  The values in the list are in the same order as corresponding futures `fs`.
      *  If any of the futures `fs` fails, the resulting future also fails.
      */
-    def all[T](fs: List[Future[T]]): Future[List[T]] = ???
-    /** Given a list of futures `fs`, returns the future holding the value of the future from `fs` that completed first.
+    def all[T](fs: List[Future[T]]): Future[List[T]] = fs match {
+      case Nil   => Future(Nil)
+      case f::fs => f.flatMap(t => all(fs).flatMap(ts => Future(t::ts)))
+    }
+
+    /** Given a list of futures `fs`, returns the future holding the value of the
+      * future from `fs` that completed first.
      *  If the first completing future in `fs` fails, then the result is failed as well.
      *
      *  E.g.:
@@ -38,7 +55,22 @@ package object nodescala {
      *
      *  may return a `Future` succeeded with `1`, `2` or failed with an `Exception`.
      */
-    def any[T](fs: List[Future[T]]): Future[T] = ???
+    def any[T](fs: List[Future[T]]): Future[T] = {
+      val p = Promise[T]()
+      def insertCallback(fs: List[Future[T]]):Unit = fs match {
+        case Nil => {} // Do nothing
+        case f :: fs => {
+          f onComplete {
+            case Success (value) => p.trySuccess(value)
+            case Failure (e) => p.tryFailure(e)
+          }
+          insertCallback (fs)
+        }
+      }
+      insertCallback(fs)
+
+      p.future
+    }
 
     /** Returns a future with a unit value that is completed after time `t`.
      */

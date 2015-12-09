@@ -31,6 +31,21 @@ class NodeScalaSuite extends FunSuite {
     }
   }
 
+  test("The first future to complete is returned") {
+    val f1 = Future.always(123)
+    val f2 = Future.never
+    val any = Future.any(List(f1,f2))
+    assert(Await.result(any, 10 millis) == 123)
+  }
+
+  test("All futures complete and are returned") {
+    val f1 = Future.always(123)
+    val f2 = Future.always(234)
+    val f3 = Future.always(345)
+    val all = Future.all(List(f1,f2,f3))
+    assert(Await.result(all, 10 millis) === List(123,234,345))
+
+  }
   
   
   class DummyExchange(val request: Request) extends Exchange {
