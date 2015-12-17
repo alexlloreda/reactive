@@ -41,8 +41,8 @@ trait NodeScala {
   /** A server:
    *  1) creates and starts an http listener
    *  2) creates a cancellation token (hint: use one of the `Future` companion methods)
-   *  3) as long as the token is not cancelled and there is a request from the http listener,
-   *     asynchronously process that request using the `respond` method
+   *  3) as long as the token is not cancelled and there is a request from the http
+   *     listener, asynchronously process that request using the `respond` method
    *
    *  @param relativePath   a relative path on which to start listening
    *  @param handler        a function mapping a request to a response
@@ -51,13 +51,15 @@ trait NodeScala {
   def start(relativePath: String)(handler: Request => Response): Subscription = {
     val listener = createListener(relativePath)
     val listenerSubscription = listener.start()
-    val subscription = Future.run() { ct => {
-      //Create a cancellable async: while token not cancelled, await for next request and respond async
-    }
 
+    Future.run() { ct => async {
+        while (ct.nonCancelled) {
+          val (request, exchange) = await(listener.nextRequest())
+          respond(exchange, ct, handler(request))
+        }
+      }
     }
-
-    // Return a subscription to can cancel http listener, server and any responses in progress
+    // Future.run return a subscription
   }
 
 }
