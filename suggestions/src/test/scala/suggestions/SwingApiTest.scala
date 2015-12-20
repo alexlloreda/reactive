@@ -67,7 +67,7 @@ class SwingApiTest extends FunSuite {
   }
 
   import swingApi._
-  
+
   test("SwingApi should emit text field values to the observable") {
     val textField = new swingApi.TextField
     val values = textField.textValues
@@ -86,6 +86,46 @@ class SwingApiTest extends FunSuite {
     textField.text = "Turing"
 
     assert(observed == Seq("T", "Tu", "Tur", "Turi", "Turin", "Turing"), observed)
+  }
+
+  test("SwingApi should emit text field values and unsubscribe without completing") {
+    val textField = new swingApi.TextField
+    val values: Observable[String] = textField.textValues
+
+    val observed = mutable.Buffer[String]()
+
+    val sub = values subscribe {
+      observed += _
+    }
+
+    // augmented: add a second subscription that records errors and completeion
+    val observed2 = mutable.Buffer[String]()
+
+
+    def onNext(s: String): Unit = observed2 += s
+    def onErr(t: Throwable): Unit = observed2 += t.getMessage
+    def onComp(): Unit = observed2 += "Completed!"
+
+    // sub2 also writes errors and completions to its list of strings
+    val sub2 = values subscribe(onNext, onErr, onComp)
+
+    // write some text now
+    textField.text = "T"
+    textField.text = "Tu"
+    textField.text = "Tur"
+    textField.text = "Turi"
+    textField.text = "Turin"
+    textField.text = "Turing"
+
+    sub.unsubscribe()
+    sub2.unsubscribe()
+
+    textField.text = "Turingx"
+
+    Thread.sleep(1000)
+
+    assert(observed === Seq("T", "Tu", "Tur", "Turi", "Turin", "Turing"), observed)
+    assert(observed2 === Seq("T", "Tu", "Tur", "Turi", "Turin", "Turing"), observed2)
   }
 
 }
