@@ -3,6 +3,7 @@ package suggestions
 
 
 import language.postfixOps
+import scala.collection.mutable
 import scala.concurrent._
 import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -50,6 +51,47 @@ class WikipediaApiTest extends FunSuite {
     )
     assert(completed && count == 3, "completed: " + completed + ", event count: " + count)
   }
+
+  /** Given an observable that can possibly be completed with an error, returns a new observable
+    * with the same values wrapped into `Success` and the potential error wrapped into `Failure`.
+    *
+    * E.g. `1, 2, 3, !Exception!` should become `Success(1), Success(2), Success(3), Failure(Exception), !TerminateStream!`
+    */
+  test("WikipediaApi should properly recover") {
+    val thrw = new Throwable
+    val failedObservable = Observable.just(1, 2, 3) ++ Observable.error(thrw)
+
+    val recoveredObserable = failedObservable.recovered
+    val observed = mutable.Buffer[Any]()
+
+    val sub = recoveredObserable subscribe {
+      observed += _
+    }
+
+    assert(observed == Seq(Success(1), Success(2), Success(3), Failure(thrw)), observed)
+  }
+
+  test("Observable should complete before timeout") {
+    val start = System.currentTimeMillis
+    val timedOutStream = Observable.from(1 to 3).zip(Observable.interval(100 millis)).timedOut(3L)
+    val contents = timedOutStream.toBlocking.toList
+    val totalTime = System.currentTimeMillis - start
+    assert(contents == List((1,0),(2,1),(3,2)))
+    assert(totalTime <= 1000)
+  }
+
+  test("return the first two values, and complete without errors") {
+    val timedOutStream = Observable.from(1 to 3).zip(Observable.interval(400 millis)).timedOut(1L)
+    val contents = timedOutStream.toBlocking.toList
+    assert(contents == List((1,0),(2,1)))
+  }
+
+  test("return the first value, and complete without errors") {
+    val timedOutStream = Observable.from(1 to 3).zip(Observable.interval(700 millis)).timedOut(1L)
+    val contents = timedOutStream.toBlocking.toList
+    assert(contents == List((1,0)))
+  }
+
   test("WikipediaApi should correctly use concatRecovered") {
     val requests = Observable.just(1, 2, 3)
     val remoteComputation = (n: Int) => Observable.just(0 to n : _*)
@@ -84,6 +126,13 @@ class WikipediaApiTest extends FunSuite {
       s => total = s
     }
     assert(total == (1 + 1 + 1 + 2 + 3 + 3 + 3), s"Sum: $total")
+  }
+
+  test("concatRecovered given test case 1") {
+    val requestStream = Observable.from(1 to 5)
+    def requestMethod(num: Int) = if (num != 4) Observable.just(num) else Observable.error(new Exception)
+    val actual = requestStream.concatRecovered(requestMethod).toBlocking.toList
+    assert(actual.toString == "List(Success(1), Success(2), Success(3), Failure(java.lang.Exception), Success(5))")
   }
 
 }
