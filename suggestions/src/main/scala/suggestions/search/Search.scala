@@ -31,7 +31,7 @@ object Search {
   def wikipediaSuggestionJson(term: String): Future[List[String]] = {
     async {
       log("querying: " + term)
-      val search = "http://en.wikipedia.org/w/api.php?action=opensearch&format=json&limit=15&search="
+      val search = "https://en.wikipedia.org/w/api.php?action=opensearch&format=json&limit=15&search="
       val response = await { Http(url(search + term).OK(as.String)) }
       val json = JsonParser.parse(response)
       val words = json(1)
@@ -41,7 +41,7 @@ object Search {
 
   def wikipediaPageJson(term: String): Future[String] = {
     async {
-      val search = "http://en.wikipedia.org/w/api.php?action=parse&format=json&prop=text&section=0&page="
+      val search = "https://en.wikipedia.org/w/api.php?action=parse&format=json&prop=text&section=0&page="
       val response = await { Http(url(search + term).OK(as.String)) }
       val json = JsonParser.parse(response)
       val text = for {
@@ -78,7 +78,7 @@ object Search {
     def page(@Query("page") term: String, callback: Callback[Page]): Unit
   }
 
-  val restAdapter = new RestAdapter.Builder().setServer("http://en.wikipedia.org").build()
+  val restAdapter = new RestAdapter.Builder().setServer("https://en.wikipedia.org").build()
 
   val service = restAdapter.create(classOf[WikipediaService])
 

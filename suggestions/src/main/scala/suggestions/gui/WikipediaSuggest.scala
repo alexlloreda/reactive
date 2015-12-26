@@ -96,16 +96,37 @@ object WikipediaSuggest extends SimpleSwingApplication with ConcreteSwingApi wit
       }
     }
 
-    // TO IMPLEMENT
-    val selections: Observable[String] = ???
-
-    // TO IMPLEMENT
-    val pages: Observable[Try[String]] = ???
-
-    // TO IMPLEMENT
-    val pageSubscription: Subscription = pages.observeOn(eventScheduler) subscribe {
-      x => ???
+    /** obtain an observable of button clicks that contains the search terms
+     * selected in the suggestion list at the time the button was clicked.
+     * If the suggestion list had no items selected, then the click should not be
+     * part of selections.
+     */
+    val selections: Observable[String] = {
+      button.clicks
+        .filter(_ => !suggestionList.selection.items.isEmpty)
+        .concatMap(_ => Observable.from(suggestionList.selection.items))
     }
+
+    /** Use the selections observable to obtain an observable of the Wikipedia
+     *  pages corresponding to the respective search term (use the previously
+     *  defined methods from the WikipediaApi)
+     *  Again, requests above may fail, so we want to wrap them into Try.
+     */
+    val pages: Observable[Try[String]] =
+      selections.concatRecovered(wikiPageResponseStream)
+
+    /** Finally, the observable pages is of little worth unless its values are
+     *  rendered somewhere. Subscribe to the pages observable to update the
+     *  editorpane with the contents of the response.
+     */
+    val pageSubscription: Subscription =
+      pages.observeOn(eventScheduler) subscribe (
+        x => x match {
+          case Success(s) => editorpane.text = s
+          case Failure(th) => editorpane.text = th.getMessage
+        },
+        throwable => editorpane.text = "There was an error retrieving the page"
+        )
 
   }
 
