@@ -58,20 +58,16 @@ class BinaryTreeSet extends Actor {
 
   var root = createRoot
 
-  // optional
   var pendingQueue = Queue.empty[Operation]
 
-  // optional
   def receive = normal
 
-  // optional
   /** Accepts `Operation` and `GC` messages. */
   val normal: Receive = {
     //case GC => context.become(garbageCollecting(createRoot))
     case (op: Operation) => root ! op
   }
 
-  // optional
   /** Handles messages while garbage collection is performed.
     * `newRoot` is the root of the new binary tree where we want to copy
     * all non-removed elements into.
@@ -99,38 +95,38 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
   var subtrees = Map[Position, ActorRef]()
   var removed = initiallyRemoved
 
-  // optional
   def receive = normal
 
-  def containsInChild(op: Operation, pos: Position ): Unit = subtrees get pos match {
-      case Some(a) => a ! op
-      case None => op.requester ! ContainsResult(op.id, false)
-    }
-
-  def insertInChild(op: Operation, pos: Position): Unit = subtrees get pos match {
-    case Some(a) => a ! op
-    case None => ??? // Create the child actor and add it to the children list
+  private def opOnNode(op: Operation): Unit = op match {
+    case Contains(ref, id, el) => ref ! ContainsResult(id, !removed)
+    case Insert(ref, id, el) => removed = false; ref ! OperationFinished(id)
+    case Remove(ref, id, el) => removed = true; ref ! OperationFinished(id)
   }
-  // optional
+
+  private def opOnChild(op: Operation, pos: Position): Unit = subtrees get pos match {
+    case Some(child) => child ! op
+    case None => op match {
+      case Contains(ref, id, el) => ref ! ContainsResult(id, false)
+      case Insert(ref, id, el) => {
+        subtrees = subtrees.updated(pos, context.actorOf(props(el, false)))
+        ref ! OperationFinished(id)
+      }
+      case Remove(ref, id, el) => ref ! OperationFinished(id)
+    }
+  }
+
   /** Handles `Operation` messages and `CopyTo` requests. */
   val normal: Receive = {
-    case cop : Contains => {
-      if (cop.elem == elem) cop.requester ! ContainsResult(cop.id, true)
-      else if (cop.elem < elem) containsInChild(cop, Left)
-      else containsInChild(cop, Left)
-    }
-    case iop: Insert => {
-      if (iop.elem == elem) iop.requester ! OperationFinished(iop.id)
-      else if (iop.elem < elem) insertInChild(iop, Left)
-      else insertInChild(iop, Right)
+    case op: Operation => {
+      if (op.elem == elem) opOnNode(op)
+      else if (op.elem < elem) opOnChild(op, Left)
+      else opOnChild(op, Right)
     }
   }
 
-  // optional
   /** `expected` is the set of ActorRefs whose replies we are waiting for,
     * `insertConfirmed` tracks whether the copy of this node to the new tree has been confirmed.
     */
   def copying(expected: Set[ActorRef], insertConfirmed: Boolean): Receive = ???
-
 
 }
