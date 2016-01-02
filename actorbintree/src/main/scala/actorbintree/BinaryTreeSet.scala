@@ -66,7 +66,10 @@ class BinaryTreeSet extends Actor {
 
   // optional
   /** Accepts `Operation` and `GC` messages. */
-  val normal: Receive = { case _ => ??? }
+  val normal: Receive = {
+    //case GC => context.become(garbageCollecting(createRoot))
+    case (op: Operation) => root ! op
+  }
 
   // optional
   /** Handles messages while garbage collection is performed.
@@ -99,9 +102,29 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
   // optional
   def receive = normal
 
+  def containsInChild(op: Operation, pos: Position ): Unit = subtrees get pos match {
+      case Some(a) => a ! op
+      case None => op.requester ! ContainsResult(op.id, false)
+    }
+
+  def insertInChild(op: Operation, pos: Position): Unit = subtrees get pos match {
+    case Some(a) => a ! op
+    case None => ??? // Create the child actor and add it to the children list
+  }
   // optional
   /** Handles `Operation` messages and `CopyTo` requests. */
-  val normal: Receive = { case _ => ??? }
+  val normal: Receive = {
+    case cop : Contains => {
+      if (cop.elem == elem) cop.requester ! ContainsResult(cop.id, true)
+      else if (cop.elem < elem) containsInChild(cop, Left)
+      else containsInChild(cop, Left)
+    }
+    case iop: Insert => {
+      if (iop.elem == elem) iop.requester ! OperationFinished(iop.id)
+      else if (iop.elem < elem) insertInChild(iop, Left)
+      else insertInChild(iop, Right)
+    }
+  }
 
   // optional
   /** `expected` is the set of ActorRefs whose replies we are waiting for,
