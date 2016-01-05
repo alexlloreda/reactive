@@ -79,7 +79,7 @@ class BinaryTreeSet extends Actor {
   def garbageCollecting(newRoot: ActorRef): Receive = {
     case (op: Operation) => pendingQueue = pendingQueue.enqueue(op)
     case CopyFinished => {
-      context.stop(root)
+      root ! PoisonPill
       root = newRoot
       pendingQueue.foreach( op => root ! op)
       context.become(normal)
@@ -157,8 +157,9 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
       val newSet = expected - context.sender()
       if (newSet.isEmpty && insertConfirmed) context.parent ! CopyFinished
       else context.become(copying(newSet, insertConfirmed))
-      context.stop(context.sender())
+      context.sender() ! PoisonPill
     }
+    case PoisonPill => context.stop(self)
   }
 
 }
