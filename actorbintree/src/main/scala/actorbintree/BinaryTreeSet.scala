@@ -64,15 +64,28 @@ class BinaryTreeSet extends Actor {
 
   /** Accepts `Operation` and `GC` messages. */
   val normal: Receive = {
-    //case GC => context.become(garbageCollecting(createRoot))
     case (op: Operation) => root ! op
+    case GC => {
+      val tempRoot = createRoot
+      context.become(garbageCollecting(tempRoot))
+      root ! CopyTo(tempRoot)
+    }
   }
 
   /** Handles messages while garbage collection is performed.
     * `newRoot` is the root of the new binary tree where we want to copy
     * all non-removed elements into.
     */
-  def garbageCollecting(newRoot: ActorRef): Receive = ???
+  def garbageCollecting(newRoot: ActorRef): Receive = {
+    case (op: Operation) => pendingQueue = pendingQueue.enqueue(op)
+    case CopyFinished => {
+      context.stop(root)
+      root = newRoot
+      pendingQueue.foreach( op => root ! op)
+      context.become(normal)
+      pendingQueue = Queue.empty[Operation]
+    }
+  }
 
 }
 
@@ -122,11 +135,30 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
       else if (op.elem < elem) opOnChild(op, Left)
       else opOnChild(op, Right)
     }
+    case CopyTo(ref) => {
+      if (!removed) ref ! Insert(self, 1, elem)
+      val children = subtrees.values.toSet
+      children.foreach(c => c ! CopyTo(ref))
+
+      if (removed && children.isEmpty) context.parent ! CopyFinished
+      else context.become(copying(children, removed))
+    }
   }
 
   /** `expected` is the set of ActorRefs whose replies we are waiting for,
     * `insertConfirmed` tracks whether the copy of this node to the new tree has been confirmed.
     */
-  def copying(expected: Set[ActorRef], insertConfirmed: Boolean): Receive = ???
+  def copying(expected: Set[ActorRef], insertConfirmed: Boolean): Receive = {
+    case OperationFinished(id) => {
+      if (expected.isEmpty) context.parent ! CopyFinished
+      else context.become(copying(expected, true))
+    }
+    case CopyFinished => {
+      val newSet = expected - context.sender()
+      if (newSet.isEmpty && insertConfirmed) context.parent ! CopyFinished
+      else context.become(copying(newSet, insertConfirmed))
+      context.stop(context.sender())
+    }
+  }
 
 }
