@@ -79,10 +79,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     case Get(key, id) => sender ! GetResult(key, kv.get(key), id)
 
     // Replication Protocol
-    case Replicate(key, valueOption, id) => {
-      updateKV(key, valueOption)
-      sender ! Replicated(key, id)
-    }
     case Snapshot(key, valueOption, seq) =>
       if (seq < expected) sender ! SnapshotAck(key, seq)
       else if (seq == expected) {
