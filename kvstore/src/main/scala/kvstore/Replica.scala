@@ -139,7 +139,11 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   private def retry(actorRef: ActorRef, msg: Any, times: Int): Future[Any] = {
     implicit val timeout = Timeout(100 millis)
     actorRef ? msg recover {
-      case e: AskTimeoutException => if (times > 0) retry(actorRef, msg, times-1)
+      case e: AskTimeoutException => if (times > 0) {
+        println("retry after timeout")
+        retry(actorRef, msg, times-1)
+      } else println("no more tries")
+      case _ => println("Some other shit went wrong")
     }
   }
 
@@ -152,23 +156,16 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       if (seq < expected) sender ! SnapshotAck(key, seq)
       else if (seq == expected) {
         updateKV(key, valueOption, seq)
-        //val fPersist = retry(persistence, Persist(key, valueOption, seq), 10)
-
-        /*
-        println("Preparing the future")
-        val f: Future[Any] = ask(persistence, Persist(key, valueOption, seq))(100 millis)
-        f onFailure {
-          case tOut: AskTimeoutException => println("Time out")
-          case e: Exception => println("Fail" + e)
+        val fPersist = retry(persistence, Persist(key, valueOption, seq), 10)
+        fPersist onFailure {
+          case _ => println("Failed!!!")
         }
-        f onSuccess {
+        fPersist onSuccess {
           case _ => {
-            println("Winning")
-            s ! SnapshotAck(key, seq)
+            sender() ! SnapshotAck(key, seq)
+            context.become(replica(expected+1))
           }
         }
-        */
-        sender ! SnapshotAck(key, seq)
         //replicators = replicators + sender()
       }
       // Ignore any request with seq > expected
