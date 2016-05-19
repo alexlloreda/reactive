@@ -1,5 +1,6 @@
 package kvstore
 
+import language.postfixOps
 import akka.actor.{Actor, ActorRef, OneForOneStrategy, Props}
 import kvstore.Arbiter._
 
@@ -8,6 +9,7 @@ import akka.actor.SupervisorStrategy.Restart
 
 import scala.annotation.tailrec
 import akka.pattern.{ask, pipe}
+import akka.pattern.AskTimeoutException
 import akka.actor.Terminated
 
 import scala.concurrent.duration._
@@ -15,6 +17,9 @@ import akka.actor.PoisonPill
 import akka.actor.OneForOneStrategy
 import akka.actor.{ReceiveTimeout, SupervisorStrategy}
 import akka.util.Timeout
+
+
+import scala.concurrent.Future
 
 object Replica {
   sealed trait Operation {
@@ -64,8 +69,14 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
 
   /* Behavior for  the leader role. */
   val leader: Receive = {
-    case Insert(k, v, id) => updateKV(k,Some(v),id)
-    case Remove(k, id) => updateKV(k,None,id)
+    case Insert(k, v, id) => {
+      updateKV(k,Some(v),id)
+      updateActors(k,Some(v),id)
+    }
+    case Remove(k, id) => {
+      updateKV(k, None, id)
+      updateActors(k, None, id)
+    }
     case Get(key, id) => sender ! GetResult(key, kv.get(key), id)
     // Persistence Protocol
     case Persisted(key, id) =>
@@ -82,8 +93,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
 
         }
       }
-
-
     case ReceiveTimeout =>
       // TODO Need to send failure after 1 second if persist continues to fail
       for ((id,(msg,actorRef,attempts)) <- persistMessages) {
@@ -93,23 +102,45 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
         }
         else {
           actorRef ! OperationFailed(id)
-          persistMessages = persistMessages - id
+          persistMessages -= id
         }
       }
   }
 
   private def updateKV(k: String, vOption: Option[String], id: Long) = {
     vOption match {
-      case None => kv = kv - k
+      case None => kv -= k
       case Some(v) => kv = kv.updated(k, v)
     }
-    val msg = Persist(k, vOption, id)
-    persistMessages = persistMessages updated(id,(msg, sender, 0))
-    persistence ! msg
-    context setReceiveTimeout(100.milliseconds)
+  }
+
+  private def updateActors(k: String, vOption: Option[String], id: Long) = {
+
+    val fPersist = retry(persistence, Persist(k, vOption, id), 10)
+
+    val s = sender()
+
+    implicit val timeout = Timeout(1 second)
+    val f = Future.traverse(replicators)(r => r ? Replicate(k, vOption, id))
+    val ff = Future.sequence(List(f, fPersist))
+    ff onComplete {_ => s ! OperationAck(id)}
+    ff onFailure {
+      case e: AskTimeoutException =>  {
+        s ! OperationFailed(id)
+        fPersist.failed
+      }
+    }
 
     replicators foreach {_ ! Replicate(k, vOption, id)}
     pendingReplicaAcks = pendingReplicaAcks updated(id, replicators)
+  }
+
+  // Get a future that will contain the response from persist and will retry every 100 ms
+  private def retry(actorRef: ActorRef, msg: Any, times: Int): Future[Any] = {
+    implicit val timeout = Timeout(100 millis)
+    actorRef ? msg recover {
+      case e: AskTimeoutException => if (times > 0) retry(actorRef, msg, times-1)
+    }
   }
 
   /* Behavior for the replica role. */
@@ -121,7 +152,24 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       if (seq < expected) sender ! SnapshotAck(key, seq)
       else if (seq == expected) {
         updateKV(key, valueOption, seq)
-        replicators = replicators + sender()
+        //val fPersist = retry(persistence, Persist(key, valueOption, seq), 10)
+
+        /*
+        println("Preparing the future")
+        val f: Future[Any] = ask(persistence, Persist(key, valueOption, seq))(100 millis)
+        f onFailure {
+          case tOut: AskTimeoutException => println("Time out")
+          case e: Exception => println("Fail" + e)
+        }
+        f onSuccess {
+          case _ => {
+            println("Winning")
+            s ! SnapshotAck(key, seq)
+          }
+        }
+        */
+        sender ! SnapshotAck(key, seq)
+        //replicators = replicators + sender()
       }
       // Ignore any request with seq > expected
 

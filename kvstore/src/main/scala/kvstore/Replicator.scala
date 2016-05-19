@@ -41,42 +41,37 @@ class Replicator(val replica: ActorRef) extends Actor {
     case Replicate(key, valueOption, id) =>
       val seq = nextSeq
       replica ! Snapshot(key, valueOption, seq)
-      acks = acks.updated(seq, (sender, Replicate(key, valueOption, id)))
-      context.setReceiveTimeout(100 milliseconds)
-      context.become(pendingConfirmation(seq))
+      acks = acks updated(seq, (sender, Replicate(key, valueOption, id)))
+      context setReceiveTimeout(100 milliseconds)
+      context become(pendingConfirmation(seq))
   }
 
   def pendingConfirmation(expected: Long): Receive = {
     case msg: Replicate =>
       val seq = nextSeq
-      acks = acks.updated(seq, (sender, msg))
-      /*
-      TODO Initial idea to implement batching
-      for {
-        (_,m) <- acks.get(expected)
-        if (m.key.equals(msg.key))
-      } yield {
+      acks = acks updated(seq, (sender, msg))
+      /* TODO Initial idea to implement batching
+      for (
+        (_,m) <- acks get expected
+        if (m key equals(msg key))
+      ) {
         pending = pending :+ Snapshot(msg.key, msg.valueOption, seq)
       }
       */
     case ReceiveTimeout =>
-      for {
-        (_,Replicate(k,v,id)) <- acks.get(expected)
-      } yield replica ! Snapshot(k,v,expected)
-    case SnapshotAck(key, s) =>
-      for {
-        (sender, Replicate(k,v,id)) <- acks.get(s)
-      } yield {
+      for ((_,Replicate(k,v,id)) <- acks get expected) replica ! Snapshot(k,v,expected)
+    case SnapshotAck(_, s) =>
+      for ((sender, Replicate(k,v,id)) <- acks get s) {
         sender ! Replicated(k, id)
         acks = acks - s
 
         acks.get(expected + 1) match {
           case None =>
-            context.become(receive)
-            context.setReceiveTimeout(Duration.Undefined)
-          case Some((_, Replicate(k,v,id))) =>
+            context become receive
+            context setReceiveTimeout Duration.Undefined
+          case Some((_, Replicate (k, v, id))) =>
             replica ! Snapshot(k, v, expected + 1)
-            context.become(pendingConfirmation(expected + 1))
+            context become pendingConfirmation(expected + 1)
         }
       }
   }
