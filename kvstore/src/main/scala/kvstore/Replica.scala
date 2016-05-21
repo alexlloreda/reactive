@@ -1,23 +1,19 @@
 package kvstore
 
 import language.postfixOps
-import akka.actor.{Actor, ActorRef, OneForOneStrategy, Props}
+import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, ReceiveTimeout, SupervisorStrategy}
 import kvstore.Arbiter._
 
 import scala.collection.immutable.Queue
 import akka.actor.SupervisorStrategy.Restart
 
 import scala.annotation.tailrec
-import akka.pattern.{ask, pipe}
-import akka.pattern.AskTimeoutException
+import akka.pattern.{AskTimeoutException, ask, pipe}
 import akka.actor.Terminated
 
 import scala.concurrent.duration._
-import akka.actor.PoisonPill
-import akka.actor.OneForOneStrategy
-import akka.actor.{ReceiveTimeout, SupervisorStrategy}
 import akka.util.Timeout
-
+import kvstore.Persistence.Persisted
 
 import scala.concurrent.Future
 
@@ -34,6 +30,8 @@ object Replica {
   case class OperationAck(id: Long) extends OperationReply
   case class OperationFailed(id: Long) extends OperationReply
   case class GetResult(key: String, valueOption: Option[String], id: Long) extends OperationReply
+
+  case class InternalReply(caller: ActorRef, msg: Persisted)
 
   def props(arbiter: ActorRef, persistenceProps: Props): Props = Props(new Replica(arbiter, persistenceProps))
 }
@@ -115,7 +113,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   }
 
   private def updateActors(k: String, vOption: Option[String], id: Long) = {
-
     val fPersist = retry(persistence, Persist(k, vOption, id), 10)
 
     val s = sender()
@@ -135,6 +132,25 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     pendingReplicaAcks = pendingReplicaAcks updated(id, replicators)
   }
 
+  /* Behavior for the replica role. */
+  def replica(expected: Long): Receive = {
+    // KV Protocol
+    case Get(key, id) => sender ! GetResult(key, kv.get(key), id)
+    // Replication Protocol
+    case Snapshot(key, valueOption, seq) =>
+      if (seq < expected) sender ! SnapshotAck(key, seq)
+      else if (seq == expected) {
+        updateKV(key, valueOption, seq)
+        val s = sender()
+        val fPersist = retry(persistence, Persist(key, valueOption, seq), 10)
+        fPersist onSuccess {case msg: Persisted =>  self ! InternalReply(s, msg)}
+      }
+      // Ignore any request with seq > expected
+    case InternalReply(caller, msg) =>
+      caller ! SnapshotAck(msg.key, expected)
+      context.become(replica(expected + 1))
+  }
+
   // Get a future that will contain the response from persist and will retry every 100 ms
   private def retry(actorRef: ActorRef, msg: Any, times: Int): Future[Any] = {
     implicit val timeout = Timeout(100 millis)
@@ -145,38 +161,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       } else println("no more tries")
       case _ => println("Some other shit went wrong")
     }
-  }
-
-  /* Behavior for the replica role. */
-  def replica(expected: Long): Receive = {
-    // KV Protocol
-    case Get(key, id) => sender ! GetResult(key, kv.get(key), id)
-    // Replication Protocol
-    case Snapshot(key, valueOption, seq) =>
-      if (seq < expected) sender ! SnapshotAck(key, seq)
-      else if (seq == expected) {
-        updateKV(key, valueOption, seq)
-        val fPersist = retry(persistence, Persist(key, valueOption, seq), 10)
-        fPersist onFailure {
-          case _ => println("Failed!!!")
-        }
-        fPersist onSuccess {
-          case _ => {
-            sender() ! SnapshotAck(key, seq)
-            context.become(replica(expected+1))
-          }
-        }
-        //replicators = replicators + sender()
-      }
-      // Ignore any request with seq > expected
-
-    // Persistence Protocol
-    case Persisted(key, seq) =>
-      for ((msg, actor,_) <- persistMessages.get(seq)) actor ! SnapshotAck(key, seq)
-      context.become(replica(expected + 1))
-      persistMessages = persistMessages - seq
-      context.setReceiveTimeout(Duration.Undefined)
-    case ReceiveTimeout => for ((_,(msg,_,_)) <- persistMessages) persistence ! msg
   }
 
 }
