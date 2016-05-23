@@ -89,10 +89,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     val f = Future.traverse(replicators)(r => r ? Replicate(k, vOption, id))
     val fp = persistor ? Persist(k, vOption, id)
     val ff = Future.sequence(Seq(f, fp))
-    fp onComplete {
-      case Success(result) => s ! OperationAck(id)
-      case Failure(ex) => s ! OperationFailed(id)
-    }
+    ff onSuccess { case _ => s ! OperationAck(id)}
+    ff onFailure { case _ => s ! OperationFailed(id)}
   }
 
   /* Behavior for the replica role. */
