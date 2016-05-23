@@ -1,5 +1,7 @@
 package kvstore
 
+import akka.actor.Status.{Failure, Success}
+
 import language.postfixOps
 import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, ReceiveTimeout, SupervisorStrategy}
 import kvstore.Arbiter._
@@ -54,55 +56,29 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   // map from id to Persist message and Actor to respond to
   var persistMessages = Map.empty[Long, (Persist, ActorRef, Int)]
   var pendingReplicaAcks = Map.empty[Long, Set[ActorRef]]
-  val persistence = context.actorOf(persistenceProps, "Persistence")
+  val persistor = context.actorOf(Persistor.props(persistenceProps), "Persistor")
 
   override def preStart = arbiter ! Join
 
-  override def receive = {
+  override def receive = get.orElse {
     case JoinedPrimary   => context.become(leader)
     case JoinedSecondary => context.become(replica(0))
+  }
+
+  // Partical function for chaining other behaviours
+  val get: Receive = {
     case Get(key, id) => sender ! GetResult(key, kv.get(key), id)
   }
 
-
   /* Behavior for  the leader role. */
-  val leader: Receive = {
-    case Insert(k, v, id) => {
+  val leader: Receive = get.orElse {
+    case Insert(k, v, id) =>
       updateKV(k,Some(v),id)
       updateActors(k,Some(v),id)
-    }
-    case Remove(k, id) => {
+
+    case Remove(k, id) =>
       updateKV(k, None, id)
       updateActors(k, None, id)
-    }
-    case Get(key, id) => sender ! GetResult(key, kv.get(key), id)
-    // Persistence Protocol
-    case Persisted(key, id) =>
-      for ((_,actor,_) <- persistMessages.get(id)) actor ! OperationAck(id)
-      persistMessages = persistMessages - id
-    case Replicated(key, id) =>
-      for (
-        s <- pendingReplicaAcks.get(id)
-        if (s.contains(sender))
-      ) {
-        val ss = s - sender
-        pendingReplicaAcks = pendingReplicaAcks.updated(id, ss)
-        if (ss.isEmpty && persistMessages.get(id).equals(None)) {
-
-        }
-      }
-    case ReceiveTimeout =>
-      // TODO Need to send failure after 1 second if persist continues to fail
-      for ((id,(msg,actorRef,attempts)) <- persistMessages) {
-        if (attempts < 10) {
-          persistence ! msg
-          persistMessages = persistMessages updated(id,(msg,actorRef, attempts+1))
-        }
-        else {
-          actorRef ! OperationFailed(id)
-          persistMessages -= id
-        }
-      }
   }
 
   private def updateKV(k: String, vOption: Option[String], id: Long) = {
@@ -113,54 +89,40 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   }
 
   private def updateActors(k: String, vOption: Option[String], id: Long) = {
-    val fPersist = retry(persistence, Persist(k, vOption, id), 10)
-
     val s = sender()
-
     implicit val timeout = Timeout(1 second)
     val f = Future.traverse(replicators)(r => r ? Replicate(k, vOption, id))
-    val ff = Future.sequence(List(f, fPersist))
-    ff onComplete {_ => s ! OperationAck(id)}
-    ff onFailure {
-      case e: AskTimeoutException =>  {
-        s ! OperationFailed(id)
-        fPersist.failed
-      }
+    val ff = Future.sequence(Seq(f, persistor ? Persist(k, vOption, id)))
+    ff onComplete {
+      case suc: Success => s ! OperationAck(id)
+      case fail: Failure => s ! OperationFailed(id)
     }
-
-    replicators foreach {_ ! Replicate(k, vOption, id)}
-    pendingReplicaAcks = pendingReplicaAcks updated(id, replicators)
   }
 
   /* Behavior for the replica role. */
-  def replica(expected: Long): Receive = {
-    // KV Protocol
-    case Get(key, id) => sender ! GetResult(key, kv.get(key), id)
+  def replica(expected: Long): Receive = get.orElse {
     // Replication Protocol
     case Snapshot(key, valueOption, seq) =>
       if (seq < expected) sender ! SnapshotAck(key, seq)
       else if (seq == expected) {
         updateKV(key, valueOption, seq)
         val s = sender()
-        val fPersist = retry(persistence, Persist(key, valueOption, seq), 10)
-        fPersist onSuccess {case msg: Persisted =>  self ! InternalReply(s, msg)}
+        val f = (persistor ? Persist(key, valueOption, seq))(Timeout(1 second))
+        f onSuccess { case msg: Persisted => self ! InternalReply(s, msg)}
+        //persistor ! Persist(key, valueOption, seq)
+        //context.become(awaitingPersistence(sender, expected))
       }
       // Ignore any request with seq > expected
-    case InternalReply(caller, msg) =>
-      caller ! SnapshotAck(msg.key, expected)
+    case InternalReply(s, msg) =>
+      s ! SnapshotAck(msg.key, msg.id)
+      context.become(replica(expected + 1))
+
+  }
+
+  def awaitingPersistence(origSender: ActorRef, expected: Long): Receive = get.orElse {
+    case Snapshot(k,v, seq) => if (seq < expected) sender ! SnapshotAck(k, seq)
+    case Persisted(k, seq) =>
+      origSender ! SnapshotAck(k, seq)
       context.become(replica(expected + 1))
   }
-
-  // Get a future that will contain the response from persist and will retry every 100 ms
-  private def retry(actorRef: ActorRef, msg: Any, times: Int): Future[Any] = {
-    implicit val timeout = Timeout(100 millis)
-    actorRef ? msg recover {
-      case e: AskTimeoutException => if (times > 0) {
-        println("retry after timeout")
-        retry(actorRef, msg, times-1)
-      } else println("no more tries")
-      case _ => println("Some other shit went wrong")
-    }
-  }
-
 }
