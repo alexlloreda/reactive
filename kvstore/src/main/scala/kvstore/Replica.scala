@@ -1,23 +1,18 @@
 package kvstore
 
-import akka.actor.Status.{Failure, Success}
-
 import language.postfixOps
-import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, ReceiveTimeout, SupervisorStrategy}
-import kvstore.Arbiter._
 
 import scala.collection.immutable.Queue
-import akka.actor.SupervisorStrategy.Restart
-
-import scala.annotation.tailrec
-import akka.pattern.{AskTimeoutException, ask, pipe}
-import akka.actor.Terminated
-
 import scala.concurrent.duration._
-import akka.util.Timeout
-import kvstore.Persistence.Persisted
-
 import scala.concurrent.Future
+
+import akka.actor.Status.{Failure, Success}
+import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, ReceiveTimeout, SupervisorStrategy, Terminated}
+import akka.pattern.ask
+import akka.util.Timeout
+
+import kvstore.Arbiter._
+import kvstore.Persistence.Persisted
 
 object Replica {
   sealed trait Operation {
@@ -92,10 +87,11 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     val s = sender()
     implicit val timeout = Timeout(1 second)
     val f = Future.traverse(replicators)(r => r ? Replicate(k, vOption, id))
-    val ff = Future.sequence(Seq(f, persistor ? Persist(k, vOption, id)))
-    ff onComplete {
-      case suc: Success => s ! OperationAck(id)
-      case fail: Failure => s ! OperationFailed(id)
+    val fp = persistor ? Persist(k, vOption, id)
+    val ff = Future.sequence(Seq(f, fp))
+    fp onComplete {
+      case Success(result) => s ! OperationAck(id)
+      case Failure(ex) => s ! OperationFailed(id)
     }
   }
 
@@ -106,17 +102,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
       if (seq < expected) sender ! SnapshotAck(key, seq)
       else if (seq == expected) {
         updateKV(key, valueOption, seq)
-        val s = sender()
-        val f = (persistor ? Persist(key, valueOption, seq))(Timeout(1 second))
-        f onSuccess { case msg: Persisted => self ! InternalReply(s, msg)}
-        //persistor ! Persist(key, valueOption, seq)
-        //context.become(awaitingPersistence(sender, expected))
+        persistor ! Persist(key, valueOption, seq)
+        context.become(awaitingPersistence(sender, expected))
       }
       // Ignore any request with seq > expected
-    case InternalReply(s, msg) =>
-      s ! SnapshotAck(msg.key, msg.id)
-      context.become(replica(expected + 1))
-
   }
 
   def awaitingPersistence(origSender: ActorRef, expected: Long): Receive = get.orElse {
