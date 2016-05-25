@@ -1,10 +1,8 @@
 package kvstore
 
 import language.postfixOps
-import scala.collection.immutable.Queue
 import scala.concurrent.duration._
 import scala.concurrent.{Future, Promise}
-import akka.actor.Status.{Failure, Success}
 import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, ReceiveTimeout, SupervisorStrategy, Terminated}
 import akka.pattern.ask
 import akka.util.Timeout
@@ -94,14 +92,13 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   }
 
   private def updateActors(k: String, vOption: Option[String], id: Long) = {
-    val s = sender()
     implicit val timeout = Timeout(1 second)
     replicatorToPromise = replicators.view map {
       r => r -> Promise[Any]().completeWith(r ? Replicate(k, vOption, id))
     } toMap
 
-//    val f2: Set[Future[Any]] = replicators map {r => r ? Replicate(k, vOption, id)}
-    val fp:Future[Any] = persistor ? Persist(k, vOption, id)
+    val s = sender()
+    val fp = persistor ? Persist(k, vOption, id)
     val ff = Future.sequence((replicatorToPromise.values.map{p:Promise[Any] => p.future} toSeq) :+ fp)
     ff onSuccess { case _ => s ! OperationAck(id)}
     ff onFailure { case _ => s ! OperationFailed(id)}
