@@ -48,9 +48,6 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   var secondaries = Map.empty[ActorRef, ActorRef]
   // the current set of replicators
   var replicators = Set.empty[ActorRef]
-  // map from id to Persist message and Actor to respond to
-  var persistMessages = Map.empty[Long, (Persist, ActorRef, Int)]
-  var pendingReplicaAcks = Map.empty[Long, Set[ActorRef]]
   val persistor = context.actorOf(Persistor.props(persistenceProps), "Persistor")
 
   override def preStart = arbiter ! Join
@@ -60,10 +57,8 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     case JoinedSecondary => context.become(replica(0))
   }
 
-  // Partical function for chaining other behaviours
-  val get: Receive = {
-    case Get(key, id) => sender ! GetResult(key, kv.get(key), id)
-  }
+  // Partial function for chaining with other behaviours
+  val get: Receive = { case Get(key, id) => sender ! GetResult(key, kv.get(key), id) }
 
   /* Behavior for  the leader role. */
   val leader: Receive = get.orElse {
@@ -74,6 +69,19 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
     case Remove(k, id) =>
       updateKV(k, None, id)
       updateActors(k, None, id)
+
+    case Replicas(replicas) =>
+      secondaries filterKeys(k => !(replicas contains k)) foreach(drp => drp._2 ! PoisonPill)
+      secondaries = secondaries filterKeys(k => replicas contains k)
+
+      val toAdd: Set[ActorRef] = (replicas - self) filter(k => !(secondaries contains k))
+
+      toAdd.foreach(r => {
+        val replicator = context.actorOf(Replicator.props(r))
+        kv.foreach(p => { replicator ! Replicate(p._1, Some(p._2), p._1.hashCode) })
+        secondaries = secondaries updated(r, replicator)
+        replicators += replicator
+      })
   }
 
   private def updateKV(k: String, vOption: Option[String], id: Long) = {
@@ -86,9 +94,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor {
   private def updateActors(k: String, vOption: Option[String], id: Long) = {
     val s = sender()
     implicit val timeout = Timeout(1 second)
-    val f = Future.traverse(replicators)(r => r ? Replicate(k, vOption, id))
+    val f2: Set[Future[Any]] = replicators map {r => r ? Replicate(k, vOption, id)}
+    //val f = Future.traverse(replicators)(r => r ? Replicate(k, vOption, id))
     val fp = persistor ? Persist(k, vOption, id)
-    val ff = Future.sequence(Seq(f, fp))
+    val ff = Future.sequence(f2 + fp)
     ff onSuccess { case _ => s ! OperationAck(id)}
     ff onFailure { case _ => s ! OperationFailed(id)}
   }

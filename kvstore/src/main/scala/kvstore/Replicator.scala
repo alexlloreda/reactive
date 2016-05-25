@@ -63,8 +63,7 @@ class Replicator(val replica: ActorRef) extends Actor {
     case SnapshotAck(_, s) =>
       for ((sender, Replicate(k,v,id)) <- acks get s) {
         sender ! Replicated(k, id)
-        acks = acks - s
-
+        acks -= s
         acks.get(expected + 1) match {
           case None =>
             context become receive
